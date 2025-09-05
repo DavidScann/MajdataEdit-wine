@@ -609,6 +609,9 @@ public partial class MainWindow : Window
 
     private void DrawFFT()
     {
+        // Audio waveform rendering disabled for performance optimization
+        return;
+        
         Dispatcher.InvokeAsync(() =>
         {
             //Scroll WaveView
@@ -661,6 +664,9 @@ public partial class MainWindow : Window
 
     private void DrawWave()
     {
+        // Audio waveform rendering disabled for performance optimization
+        return;
+        
         if (isDrawing) return;
         if (WaveBitmap == null) return;
 

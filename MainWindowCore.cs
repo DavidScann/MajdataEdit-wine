@@ -76,7 +76,7 @@ public partial class MainWindow : Window
 
 
     //*UI DRAWING
-    private readonly Timer visualEffectRefreshTimer = new(1);
+    private readonly Timer visualEffectRefreshTimer = new(16.66);
 
     private WriteableBitmap? WaveBitmap;
 

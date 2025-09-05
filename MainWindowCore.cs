@@ -94,6 +94,30 @@ public partial class MainWindow : Window
     private readonly List<double> weakBeatCache = new();
     private double lastDrawnTime = -1.0;
 
+    // FIX: Add this constructor to hook up the TextChanged event
+    public MainWindow()
+    {
+        InitializeComponent(); // Assuming this is called in your original code
+        FumenContent.TextChanged += FumenContent_OnTextChanged;
+    }
+
+    // FIX: Add this event handler
+    private void FumenContent_OnTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (isLoading) return;
+
+        // Give immediate feedback that a change was made
+        if (isSaved)
+        {
+            SetSavedState(false);
+        }
+
+        // Debounce the expensive update.
+        // This resets the timer every time you type. The timer will only
+        // fire after you've stopped typing for the specified interval.
+        chartChangeTimer.Stop();
+        chartChangeTimer.Start();
+    }
 
     //*TEXTBOX CONTROL
     private string GetRawFumenText()
@@ -581,6 +605,9 @@ public partial class MainWindow : Window
         ViewerTouchSpeed.Content = editorSetting.touchSpeed.ToString("F1");
 
         chartChangeTimer.Interval = editorSetting.ChartRefreshDelay; // 设置更新延迟
+        chartChangeTimer.AutoReset = false; // FIX: Ensure timer only fires once per edit session
+        chartChangeTimer.Elapsed += ChartChangeTimer_Elapsed;
+
 
         SaveEditorSetting(); // 覆盖旧版本setting
     }
@@ -812,7 +839,6 @@ public partial class MainWindow : Window
                     graphics.DrawLine(timingPen, x, 60, x, 75);
                 }
                 
-                // FIX: Always call DrawNotes. The logic inside will handle visibility.
                 DrawNotes(graphics, visibleStartTime, pixelsPerSecond);
 
                 // Draw Play Start Time
@@ -839,24 +865,21 @@ public partial class MainWindow : Window
         });
     }
 
-    // FIX: This method is heavily revised for correctness.
     private void DrawNotes(Graphics graphics, double visibleStartTime, double pixelsPerSecond)
     {
         var visibleEndTime = visibleStartTime + deltatime * 2;
 
         foreach (var note in SimaiProcess.notelist)
         {
-            // Determine the note's main time and check if it's visible.
-            // For slides, the main time is the slide start time, not the tap time.
-            var noteTime = (note.getNotes().FirstOrDefault()?.noteType == SimaiNoteType.Slide) ? note.getNotes().First().slideStartTime : note.time;
-            var noteEndTime = noteTime + note.getNotes().Max(n => n.holdTime + n.slideTime);
+            var noteTime = note.time;
+            var maxDuration = note.getNotes().Max(n => n.holdTime + n.slideTime);
+            var noteEndTime = noteTime + maxDuration;
 
             if (noteEndTime < visibleStartTime || noteTime > visibleEndTime) continue;
             
             var notes = note.getNotes();
             var isEach = notes.Count(o => !o.isSlideNoHead) > 1;
             
-            // The X position of the note's start (tap time)
             var x = (float)((note.time - visibleStartTime) * pixelsPerSecond);
 
             foreach (var noteD in notes)
@@ -923,7 +946,6 @@ public partial class MainWindow : Window
 
                 if (noteD.noteType == SimaiNoteType.Slide)
                 {
-                    // Draw the star at the tap's location (x)
                     if (!noteD.isSlideNoHead)
                     {
                         starBrush.Color = noteD.isBreak ? Color.OrangeRed : (isEach ? Color.Gold : Color.DeepSkyBlue);
@@ -934,7 +956,6 @@ public partial class MainWindow : Window
                     notePen.Color = noteD.isSlideBreak ? Color.OrangeRed : (notes.Count(o => o.noteType == SimaiNoteType.Slide) >= 2 ? Color.Gold : Color.SkyBlue);
                     notePen.DashStyle = DashStyle.Dot;
                     
-                    // The slide track itself starts at the slide's own start time
                     var xSlideStart = (float)((noteD.slideStartTime - visibleStartTime) * pixelsPerSecond);
                     var xSlideEnd = xSlideStart + (float)(noteD.slideTime * pixelsPerSecond);
                     

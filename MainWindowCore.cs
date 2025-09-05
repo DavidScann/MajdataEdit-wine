@@ -76,9 +76,24 @@ public partial class MainWindow : Window
 
 
     //*UI DRAWING
-    private readonly Timer visualEffectRefreshTimer = new(16.66);
+    private readonly Timer visualEffectRefreshTimer = new(33); // Optimization: Reduced from 16.66ms (60fps) to 33ms (~30fps)
 
     private WriteableBitmap? WaveBitmap;
+
+    // Optimization: Caching GDI objects
+    private readonly Pen bpmPen = new(Color.Yellow, 1);
+    private readonly Pen timingPen = new(Color.White, 1);
+    private readonly Pen playStartPen = new(Color.Red, 5);
+    private readonly Pen ghostCursorPen = new(Color.Orange, 5);
+    private readonly Pen notePen = new(Color.White, 2);
+    private readonly Font starFont = new("Consolas", 12, System.Drawing.FontStyle.Bold);
+    private readonly SolidBrush starBrush = new(Color.White);
+    
+    // Optimization: Caching beat calculations
+    private readonly List<double> strongBeatCache = new();
+    private readonly List<double> weakBeatCache = new();
+    private double lastDrawnTime = -1.0;
+
 
     //*TEXTBOX CONTROL
     private string GetRawFumenText()
@@ -107,6 +122,8 @@ public partial class MainWindow : Window
             paragraph.Inlines.Add(line);
             FumenContent.Document.Blocks.Add(paragraph);
         }
+
+
 
         isLoading = false;
     }
@@ -314,6 +331,7 @@ public partial class MainWindow : Window
         SetRawFumenText(SimaiProcess.fumens[selectedDifficulty]);
         SeekTextFromTime();
         SimaiProcess.Serialize(GetRawFumenText());
+        RecalculateBeatAndTimingCache(); // Optimization: Initial cache calculation
         FumenContent.Focus();
         DrawWave();
 
@@ -602,10 +620,61 @@ public partial class MainWindow : Window
             delegate
             {
                 SimaiProcess.Serialize(GetRawFumenText(), GetRawFumenPosition());
+                RecalculateBeatAndTimingCache(); // Optimization: Recalculate cache when chart changes
                 DrawWave();
             }
         );
     }
+
+    // Optimization: New method to calculate and cache beat timings
+    private void RecalculateBeatAndTimingCache()
+    {
+        strongBeatCache.Clear();
+        weakBeatCache.Clear();
+
+        if (SimaiProcess.timinglist.Count == 0) return;
+
+        var lastbpm = -1f;
+        var bpmChangeTimes = new List<double>();
+        var bpmChangeValues = new List<float>();
+
+        foreach (var timing in SimaiProcess.timinglist)
+        {
+            if (timing.currentBpm != lastbpm)
+            {
+                bpmChangeTimes.Add(timing.time);
+                bpmChangeValues.Add(timing.currentBpm);
+                lastbpm = timing.currentBpm;
+            }
+        }
+        bpmChangeTimes.Add(songLength); // Add end of song
+
+        double time = SimaiProcess.first;
+        var signature = 4; //预留拍号
+        var currentBeat = 1;
+        var timePerBeat = 0d;
+
+        for (var i = 1; i < bpmChangeTimes.Count; i++)
+        {
+            timePerBeat = 60.0 / bpmChangeValues[i - 1];
+            if (timePerBeat <= 0) continue; // Avoid infinite loops with 0 bpm
+
+            while (time < bpmChangeTimes[i] - 0.001) // Check against next BPM change
+            {
+                if (currentBeat > signature) currentBeat = 1;
+                if (currentBeat == 1)
+                    strongBeatCache.Add(time);
+                else
+                    weakBeatCache.Add(time);
+                
+                currentBeat++;
+                time += timePerBeat;
+            }
+            time = bpmChangeTimes[i];
+            currentBeat = 1;
+        }
+    }
+
 
     private void DrawFFT()
     {
@@ -664,287 +733,209 @@ public partial class MainWindow : Window
 
     private void DrawWave()
     {
-        // Audio waveform rendering disabled for performance optimization
-        // return;
+        if (isDrawing || WaveBitmap == null || waveRaws[0] == null) return;
         
-        if (isDrawing) return;
-        if (WaveBitmap == null) return;
+        var currentTime = Bass.BASS_ChannelBytes2Seconds(bgmStream, Bass.BASS_ChannelGetPosition(bgmStream));
+        // Optimization: Throttle drawing. Only redraw if time has changed by a meaningful amount.
+        if (Math.Abs(currentTime - lastDrawnTime) < 0.016 && Bass.BASS_ChannelIsActive(bgmStream) != BASSActive.BASS_ACTIVE_PLAYING)
+        {
+            return;
+        }
+        lastDrawnTime = currentTime;
 
         Dispatcher.Invoke(() =>
         {
             isDrawing = true;
+            WaveBitmap.Lock();
+            
             var width = WaveBitmap.PixelWidth;
             var height = WaveBitmap.PixelHeight;
 
-            if (waveRaws[0] == null)
+            var backBitmap = new Bitmap(width, height, WaveBitmap.BackBufferStride, PixelFormat.Format32bppArgb, WaveBitmap.BackBuffer);
+            using (var graphics = Graphics.FromImage(backBitmap))
             {
-                isDrawing = false;
-                return;
-            }
+                graphics.Clear(Color.FromArgb(100, 0, 0, 0));
 
-            WaveBitmap.Lock();
+                var resample = (int)deltatime - 1;
+                if (resample > 1 && resample <= 3) resample = 1;
+                if (resample > 3) resample = 2;
+                var waveLevels = waveRaws[resample];
 
-            //the process starts
-            var backBitmap = new Bitmap(width, height, WaveBitmap.BackBufferStride,
-                PixelFormat.Format32bppArgb, WaveBitmap.BackBuffer);
-            var graphics = Graphics.FromImage(backBitmap);
-            var currentTime = Bass.BASS_ChannelBytes2Seconds(bgmStream, Bass.BASS_ChannelGetPosition(bgmStream));
+                var step = songLength / waveLevels.Length;
+                var startindex = (int)((currentTime - deltatime) / step);
+                var stopindex = (int)((currentTime + deltatime) / step);
+                var linewidth = backBitmap.Width / (float)(stopindex - startindex);
 
-            graphics.Clear(Color.FromArgb(100, 0, 0, 0));
-
-            var resample = (int)deltatime - 1;
-            if (resample > 1 && resample <= 3) resample = 1;
-            if (resample > 3) resample = 2;
-            var waveLevels = waveRaws[resample];
-
-            var step = songLength / waveLevels.Length;
-            var startindex = (int)((currentTime - deltatime) / step);
-            var stopindex = (int)((currentTime + deltatime) / step);
-            var linewidth = backBitmap.Width / (float)(stopindex - startindex);
-            var pen = new Pen(Color.Green, linewidth);
-            var points = new List<PointF>();
-            for (var i = startindex; i < stopindex; i = i + 1)
-            {
-                if (i < 0) i = 0;
-                if (i >= waveLevels.Length - 1) break;
-
-                var x = (i - startindex) * linewidth;
-                var y = waveLevels[i] / 65535f * height + height / 2;
-
-                points.Add(new PointF(x, y));
-            }
-
-            graphics.DrawLines(pen, points.ToArray());
-
-            //Draw Bpm lines
-            var lastbpm = -1f;
-            var bpmChangeTimes = new List<double>(); //在什么时间变成什么值
-            var bpmChangeValues = new List<float>();
-            bpmChangeTimes.Clear();
-            bpmChangeValues.Clear();
-            foreach (var timing in SimaiProcess.timinglist)
-                if (timing.currentBpm != lastbpm)
+                // Draw Waveform
+                using (var wavePen = new Pen(Color.Green, linewidth))
                 {
-                    bpmChangeTimes.Add(timing.time);
-                    bpmChangeValues.Add(timing.currentBpm);
-                    lastbpm = timing.currentBpm;
+                    var points = new List<PointF>();
+                    for (var i = startindex; i < stopindex; i = i + 1)
+                    {
+                        if (i < 0) continue;
+                        if (i >= waveLevels.Length - 1) break;
+                        var x = (i - startindex) * linewidth;
+                        var y = waveLevels[i] / 65535f * height + height / 2;
+                        points.Add(new PointF(x, y));
+                    }
+                    if (points.Count > 1) graphics.DrawLines(wavePen, points.ToArray());
+                }
+                
+                //Draw Bpm lines from cache
+                foreach (var btime in strongBeatCache)
+                {
+                    if (btime > currentTime + deltatime || btime < currentTime - deltatime) continue;
+                    var x = ((float)((btime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    graphics.DrawLine(bpmPen, x, 0, x, 75);
+                }
+                foreach (var btime in weakBeatCache)
+                {
+                    if (btime > currentTime + deltatime || btime < currentTime - deltatime) continue;
+                    var x = ((float)((btime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    graphics.DrawLine(bpmPen, x, 0, x, 15);
                 }
 
-            bpmChangeTimes.Add(Bass.BASS_ChannelBytes2Seconds(bgmStream, Bass.BASS_ChannelGetLength(bgmStream)));
-
-            double time = SimaiProcess.first;
-            var signature = 4; //预留拍号
-            var currentBeat = 1;
-            var timePerBeat = 0d;
-            pen = new Pen(Color.Yellow, 1);
-            var strongBeat = new List<double>();
-            var weakBeat = new List<double>();
-            for (var i = 1; i < bpmChangeTimes.Count; i++)
-            {
-                while (time - bpmChangeTimes[i] < -0.05) //在那个时间之前都是之前的bpm
+                //Draw timing lines
+                foreach (var note in SimaiProcess.timinglist)
                 {
-                    if (currentBeat > signature) currentBeat = 1;
-                    timePerBeat = 1d / (bpmChangeValues[i - 1] / 60d);
-                    if (currentBeat == 1)
-                        strongBeat.Add(time);
-                    else
-                        weakBeat.Add(time);
-                    currentBeat++;
-                    time += timePerBeat;
+                    if (note.time > currentTime + deltatime || note.time < currentTime - deltatime) continue;
+                    var x = ((float)((note.time - currentTime + deltatime) / (deltatime * 2))) * width;
+                    graphics.DrawLine(timingPen, x, 60, x, 75);
                 }
 
-                time = bpmChangeTimes[i];
-                currentBeat = 1;
-            }
-
-            foreach (var btime in strongBeat)
-            {
-                if (btime - currentTime > deltatime) continue;
-                var x = ((float)(btime / step) - startindex) * linewidth;
-                graphics.DrawLine(pen, x, 0, x, 75);
-            }
-
-            foreach (var btime in weakBeat)
-            {
-                if (btime - currentTime > deltatime) continue;
-                var x = ((float)(btime / step) - startindex) * linewidth;
-                graphics.DrawLine(pen, x, 0, x, 15);
-            }
-
-            //Draw timing lines
-            pen = new Pen(Color.White, 1);
-            foreach (var note in SimaiProcess.timinglist)
-            {
-                if (note == null) break;
-                if (note.time - currentTime > deltatime) continue;
-                var x = ((float)(note.time / step) - startindex) * linewidth;
-                graphics.DrawLine(pen, x, 60, x, 75);
-            }
-
-            //Draw notes                    
-            foreach (var note in SimaiProcess.notelist)
-            {
-                if (note == null) break;
-                if (note.time - currentTime > deltatime) continue;
-                var notes = note.getNotes();
-                var isEach = notes.Count(o => !o.isSlideNoHead) > 1;
-
-                var x = ((float)(note.time / step) - startindex) * linewidth;
-
-                foreach (var noteD in notes)
+                // Optimization: Level of Detail (LOD) for notes. Don't draw if too zoomed out.
+                if (linewidth > 0.5f)
                 {
-                    var y = noteD.startPosition * 6.875f + 8f; //与键位有关
-
-                    if (noteD.isHanabi)
-                    {
-                        var xDeltaHanabi = (float)(1f / step) * linewidth; //Hanabi is 1s due to frame analyze
-                        var rectangleF = new RectangleF(x, 0, xDeltaHanabi, 75);
-                        if (noteD.noteType == SimaiNoteType.TouchHold)
-                            rectangleF.X += (float)(noteD.holdTime / step) * linewidth;
-                        var gradientBrush = new LinearGradientBrush(
-                            rectangleF,
-                            Color.FromArgb(100, 255, 0, 0),
-                            Color.FromArgb(0, 255, 0, 0),
-                            LinearGradientMode.Horizontal
-                        );
-                        graphics.FillRectangle(gradientBrush, rectangleF);
-                    }
-
-                    if (noteD.noteType == SimaiNoteType.Tap)
-                    {
-                        if (noteD.isForceStar)
-                        {
-                            pen.Width = 3;
-                            if (noteD.isBreak)
-                                pen.Color = Color.OrangeRed;
-                            else if (isEach)
-                                pen.Color = Color.Gold;
-                            else
-                                pen.Color = Color.DeepSkyBlue;
-                            Brush brush = new SolidBrush(pen.Color);
-                            graphics.DrawString("*", new Font("Consolas", 12, System.Drawing.FontStyle.Bold), brush,
-                                new PointF(x - 7f, y - 7f));
-                        }
-                        else
-                        {
-                            pen.Width = 2;
-                            if (noteD.isBreak)
-                                pen.Color = Color.OrangeRed;
-                            else if (isEach)
-                                pen.Color = Color.Gold;
-                            else
-                                pen.Color = Color.LightPink;
-                            graphics.DrawEllipse(pen, x - 2.5f, y - 2.5f, 5, 5);
-                        }
-                    }
-
-                    if (noteD.noteType == SimaiNoteType.Touch)
-                    {
-                        pen.Width = 2;
-                        pen.Color = isEach ? Color.Gold : Color.DeepSkyBlue;
-                        graphics.DrawRectangle(pen, x - 2.5f, y - 2.5f, 5, 5);
-                    }
-
-                    if (noteD.noteType == SimaiNoteType.Hold)
-                    {
-                        pen.Width = 3;
-                        if (noteD.isBreak)
-                            pen.Color = Color.OrangeRed;
-                        else if (isEach)
-                            pen.Color = Color.Gold;
-                        else
-                            pen.Color = Color.LightPink;
-
-                        var xRight = x + (float)(noteD.holdTime / step) * linewidth;
-
-                        //1h[0:1]
-                        if (!float.IsNormal(xRight)) xRight = ushort.MaxValue;
-                        if (xRight - x < 1f) xRight = x + 5;
-                        graphics.DrawLine(pen, x, y, xRight, y);
-
-                    }
-
-                    if (noteD.noteType == SimaiNoteType.TouchHold)
-                    {
-                        pen.Width = 3;
-                        var xDelta = (float)(noteD.holdTime / step) * linewidth / 4f;
-                        //Console.WriteLine("HoldPixel"+ xDelta);
-                        if (!float.IsNormal(xDelta)) xDelta = ushort.MaxValue;
-                        if (xDelta < 1f) xDelta = 1;
-
-                        pen.Color = Color.FromArgb(200, 255, 75, 0);
-                        graphics.DrawLine(pen, x, y, x + xDelta * 4f, y);
-                        pen.Color = Color.FromArgb(200, 255, 241, 0);
-                        graphics.DrawLine(pen, x, y, x + xDelta * 3f, y);
-                        pen.Color = Color.FromArgb(200, 2, 165, 89);
-                        graphics.DrawLine(pen, x, y, x + xDelta * 2f, y);
-                        pen.Color = Color.FromArgb(200, 0, 140, 254);
-                        graphics.DrawLine(pen, x, y, x + xDelta, y);
-                    }
-
-                    if (noteD.noteType == SimaiNoteType.Slide)
-                    {
-                        pen.Width = 3;
-                        if (!noteD.isSlideNoHead)
-                        {
-                            if (noteD.isBreak)
-                                pen.Color = Color.OrangeRed;
-                            else if (isEach)
-                                pen.Color = Color.Gold;
-                            else
-                                pen.Color = Color.DeepSkyBlue;
-                            Brush brush = new SolidBrush(pen.Color);
-                            graphics.DrawString("*", new Font("Consolas", 12, System.Drawing.FontStyle.Bold), brush,
-                                new PointF(x - 7f, y - 7f));
-                        }
-
-                        if (noteD.isSlideBreak)
-                            pen.Color = Color.OrangeRed;
-                        else if (notes.Count(o => o.noteType == SimaiNoteType.Slide) >= 2)
-                            pen.Color = Color.Gold;
-                        else
-                            pen.Color = Color.SkyBlue;
-                        pen.DashStyle = DashStyle.Dot;
-                        var xSlide = (float)(noteD.slideStartTime / step - startindex) * linewidth;
-                        var xSlideRight = (float)(noteD.slideTime / step) * linewidth + xSlide;
-
-                        if (!float.IsNormal(xSlideRight)) xSlideRight = ushort.MaxValue;
-                        if (!float.IsNormal(xSlide)) xSlide = ushort.MaxValue;
-
-                        graphics.DrawLine(pen, xSlide, y, xSlideRight, y);
-                        pen.DashStyle = DashStyle.Solid;
-                    }
+                    DrawNotes(graphics, currentTime, width);
                 }
-            }
 
-            if (playStartTime - currentTime <= deltatime)
-            {
-                //Draw play Start time
-                pen = new Pen(Color.Red, 5);
-                var x1 = (float)(playStartTime / step - startindex) * linewidth;
-                PointF[] tranglePoints = { new(x1 - 2, 0), new(x1 + 2, 0), new(x1, 3.46f) };
-                graphics.DrawPolygon(pen, tranglePoints);
-            }
+                // Draw Play Start Time
+                if (playStartTime >= currentTime - deltatime && playStartTime <= currentTime + deltatime)
+                {
+                    var x1 = ((float)((playStartTime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    PointF[] tranglePoints = { new(x1 - 2, 0), new(x1 + 2, 0), new(x1, 3.46f) };
+                    graphics.DrawPolygon(playStartPen, tranglePoints);
+                }
 
-            if (ghostCusorPositionTime - currentTime <= deltatime)
-            {
-                //Draw ghost cusor
-                pen = new Pen(Color.Orange, 5);
-                var x2 = (float)(ghostCusorPositionTime / step - startindex) * linewidth;
-                PointF[] tranglePoints2 = { new(x2 - 2, 0), new(x2 + 2, 0), new(x2, 3.46f) };
-                graphics.DrawPolygon(pen, tranglePoints2);
-            }
+                // Draw Ghost Cursor
+                if (ghostCusorPositionTime >= currentTime - deltatime && ghostCusorPositionTime <= currentTime + deltatime)
+                {
+                    var x2 = ((float)((ghostCusorPositionTime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    PointF[] tranglePoints2 = { new(x2 - 2, 0), new(x2 + 2, 0), new(x2, 3.46f) };
+                    graphics.DrawPolygon(ghostCursorPen, tranglePoints2);
+                }
+            } // graphics disposed here
 
-            graphics.Flush();
-            graphics.Dispose();
             backBitmap.Dispose();
-
-            //MusicWave.Width = waveLevels.Length * zoominPower;
-            WaveBitmap.AddDirtyRect(new Int32Rect(0, 0, WaveBitmap.PixelWidth, WaveBitmap.PixelHeight));
+            WaveBitmap.AddDirtyRect(new Int32Rect(0, 0, width, height));
             WaveBitmap.Unlock();
             isDrawing = false;
         });
     }
+
+    // Optimization: Extracted note drawing logic into its own method for clarity
+    private void DrawNotes(Graphics graphics, double currentTime, float totalWidth)
+    {
+        var timeToX = totalWidth / (deltatime * 2);
+
+        foreach (var note in SimaiProcess.notelist)
+        {
+            if (note.time > currentTime + deltatime || note.time < currentTime - deltatime) continue;
+            
+            var notes = note.getNotes();
+            var isEach = notes.Count(o => !o.isSlideNoHead) > 1;
+            var x = (float)((note.time - currentTime + deltatime) * timeToX);
+
+            foreach (var noteD in notes)
+            {
+                var y = noteD.startPosition * 6.875f + 8f;
+
+                if (noteD.isHanabi)
+                {
+                    var xDeltaHanabi = (float)(1f * timeToX);
+                    var rectangleF = new RectangleF(x, 0, xDeltaHanabi, 75);
+                    if (noteD.noteType == SimaiNoteType.TouchHold)
+                        rectangleF.X += (float)(noteD.holdTime * timeToX);
+                    using (var gradientBrush = new LinearGradientBrush(rectangleF, Color.FromArgb(100, 255, 0, 0), Color.FromArgb(0, 255, 0, 0), LinearGradientMode.Horizontal))
+                    {
+                        graphics.FillRectangle(gradientBrush, rectangleF);
+                    }
+                }
+
+                if (noteD.noteType == SimaiNoteType.Tap)
+                {
+                    if (noteD.isForceStar)
+                    {
+                        starBrush.Color = noteD.isBreak ? Color.OrangeRed : (isEach ? Color.Gold : Color.DeepSkyBlue);
+                        graphics.DrawString("*", starFont, starBrush, new PointF(x - 7f, y - 7f));
+                    }
+                    else
+                    {
+                        notePen.Width = 2;
+                        notePen.Color = noteD.isBreak ? Color.OrangeRed : (isEach ? Color.Gold : Color.LightPink);
+                        graphics.DrawEllipse(notePen, x - 2.5f, y - 2.5f, 5, 5);
+                    }
+                }
+
+                if (noteD.noteType == SimaiNoteType.Touch)
+                {
+                    notePen.Width = 2;
+                    notePen.Color = isEach ? Color.Gold : Color.DeepSkyBlue;
+                    graphics.DrawRectangle(notePen, x - 2.5f, y - 2.5f, 5, 5);
+                }
+
+                if (noteD.noteType == SimaiNoteType.Hold)
+                {
+                    notePen.Width = 3;
+                    notePen.Color = noteD.isBreak ? Color.OrangeRed : (isEach ? Color.Gold : Color.LightPink);
+                    var xRight = x + (float)(noteD.holdTime * timeToX);
+                    if (!float.IsNormal(xRight)) xRight = ushort.MaxValue;
+                    if (xRight - x < 1f) xRight = x + 5;
+                    graphics.DrawLine(notePen, x, y, xRight, y);
+                }
+                
+                if (noteD.noteType == SimaiNoteType.TouchHold)
+                {
+                    notePen.Width = 3;
+                    var xDelta = (float)(noteD.holdTime * timeToX) / 4f;
+                    if (!float.IsNormal(xDelta)) xDelta = ushort.MaxValue;
+                    if (xDelta < 1f) xDelta = 1;
+
+                    notePen.Color = Color.FromArgb(200, 255, 75, 0);
+                    graphics.DrawLine(notePen, x, y, x + xDelta * 4f, y);
+                    notePen.Color = Color.FromArgb(200, 255, 241, 0);
+                    graphics.DrawLine(notePen, x, y, x + xDelta * 3f, y);
+                    notePen.Color = Color.FromArgb(200, 2, 165, 89);
+                    graphics.DrawLine(notePen, x, y, x + xDelta * 2f, y);
+                    notePen.Color = Color.FromArgb(200, 0, 140, 254);
+                    graphics.DrawLine(notePen, x, y, x + xDelta, y);
+                }
+
+                if (noteD.noteType == SimaiNoteType.Slide)
+                {
+                    if (!noteD.isSlideNoHead)
+                    {
+                        starBrush.Color = noteD.isBreak ? Color.OrangeRed : (isEach ? Color.Gold : Color.DeepSkyBlue);
+                        graphics.DrawString("*", starFont, starBrush, new PointF(x - 7f, y - 7f));
+                    }
+
+                    notePen.Width = 3;
+                    notePen.Color = noteD.isSlideBreak ? Color.OrangeRed : (notes.Count(o => o.noteType == SimaiNoteType.Slide) >= 2 ? Color.Gold : Color.SkyBlue);
+                    notePen.DashStyle = DashStyle.Dot;
+                    
+                    var xSlide = (float)((noteD.slideStartTime - currentTime + deltatime) * timeToX);
+                    var xSlideRight = (float)(noteD.slideTime * timeToX) + xSlide;
+
+                    if (!float.IsNormal(xSlideRight)) xSlideRight = ushort.MaxValue;
+                    if (!float.IsNormal(xSlide)) xSlide = ushort.MaxValue;
+                    
+                    graphics.DrawLine(notePen, xSlide, y, xSlideRight, y);
+                    notePen.DashStyle = DashStyle.Solid;
+                }
+            }
+        }
+    }
+
 
     // This update less frequently. set the time text.
     private void CurrentTimeRefreshTimer_Elapsed(object? sender, ElapsedEventArgs e)
@@ -1004,6 +995,7 @@ public partial class MainWindow : Window
         isPlan2Stop = false;
         PlayAndPauseButton.Content = "  ▌▌ ";
         var CusorTime = SimaiProcess.Serialize(GetRawFumenText(), GetRawFumenPosition()); //scan first
+        RecalculateBeatAndTimingCache(); // Recalculate cache on play
 
         //TODO: Moeying改一下你的generateSoundEffect然后把下面这行删了
         var isOpIncluded = playMethod == PlayMethod.Normal ? false : true;

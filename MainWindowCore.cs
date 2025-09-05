@@ -99,13 +99,17 @@ public partial class MainWindow : Window
     {
         if (isLoading) return;
 
+        // Give immediate feedback that a change was made
         if (isSaved)
         {
             SetSavedState(false);
         }
-        
-        // This is the new, robust way to request an update.
-        RequestChartUpdate();
+
+        // Debounce the expensive update.
+        // This resets the timer every time you type. The timer will only
+        // fire after you've stopped typing for the specified interval.
+        chartChangeTimer.Stop();
+        chartChangeTimer.Start();
     }
 
     //*TEXTBOX CONTROL
@@ -597,6 +601,7 @@ public partial class MainWindow : Window
         chartChangeTimer.AutoReset = false; 
         chartChangeTimer.Elapsed += ChartChangeTimer_Elapsed;
         
+        // FIX: Hook up the TextChanged event handler here instead of a new constructor
         FumenContent.TextChanged += FumenContent_OnTextChanged;
 
         SaveEditorSetting(); // 覆盖旧版本setting
@@ -628,27 +633,19 @@ public partial class MainWindow : Window
         }
     }
 
-    // FIX: This is the new, centralized method to request an update after a delay.
-    private void RequestChartUpdate()
-    {
-        // This is the "debouncing" logic. It restarts the timer every time it's called.
-        // The actual update will only happen after the user stops typing for the duration of the interval.
-        chartChangeTimer.Stop();
-        chartChangeTimer.Start();
-    }
-
-
-    // This method now ONLY contains the logic that needs to be delayed.
+    // 谱面变更延迟解析
     private void ChartChangeTimer_Elapsed(object? sender, ElapsedEventArgs e)
     {
-        Console.WriteLine("Chart Update Timer Elapsed");
-        Dispatcher.Invoke(() =>
-        {
-            SimaiProcess.Serialize(GetRawFumenText());
-            RecalculateBeatAndTimingCache();
-            SyntaxCheck();
-            DrawWave();
-        });
+        Console.WriteLine("TextChanged");
+        SyntaxCheck();
+        Dispatcher.Invoke(
+            delegate
+            {
+                SimaiProcess.Serialize(GetRawFumenText(), GetRawFumenPosition());
+                RecalculateBeatAndTimingCache(); // Optimization: Recalculate cache when chart changes
+                DrawWave();
+            }
+        );
     }
 
     // Optimization: New method to calculate and cache beat timings

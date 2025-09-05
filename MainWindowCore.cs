@@ -762,18 +762,23 @@ public partial class MainWindow : Window
                 var waveLevels = waveRaws[resample];
 
                 var step = songLength / waveLevels.Length;
+                if (step <= 0) step = 0.001; // Prevent division by zero
                 var startindex = (int)((currentTime - deltatime) / step);
                 var stopindex = (int)((currentTime + deltatime) / step);
-                var linewidth = backBitmap.Width / (float)(stopindex - startindex);
+                
+                // This check prevents a crash if stopindex is less than or equal to startindex
+                if (stopindex <= startindex) startindex = stopindex - 1;
+                if (startindex < 0) startindex = 0;
+
+                var linewidth = width / (float)(stopindex - startindex);
 
                 // Draw Waveform
                 using (var wavePen = new Pen(Color.Green, linewidth))
                 {
                     var points = new List<PointF>();
-                    for (var i = startindex; i < stopindex; i = i + 1)
+                    for (var i = startindex; i < stopindex; i++)
                     {
-                        if (i < 0) continue;
-                        if (i >= waveLevels.Length - 1) break;
+                        if (i >= waveLevels.Length) break;
                         var x = (i - startindex) * linewidth;
                         var y = waveLevels[i] / 65535f * height + height / 2;
                         points.Add(new PointF(x, y));
@@ -783,19 +788,19 @@ public partial class MainWindow : Window
                 
                 var visibleStartTime = currentTime - deltatime;
                 var visibleEndTime = currentTime + deltatime;
-                var timeToX = width / (deltatime * 2);
+                var pixelsPerSecond = width / (deltatime * 2.0);
 
                 //Draw Bpm lines from cache
                 foreach (var btime in strongBeatCache)
                 {
                     if (btime > visibleEndTime || btime < visibleStartTime) continue;
-                    var x = (float)((btime - visibleStartTime) * timeToX);
+                    var x = (float)((btime - visibleStartTime) * pixelsPerSecond);
                     graphics.DrawLine(bpmPen, x, 0, x, 75);
                 }
                 foreach (var btime in weakBeatCache)
                 {
                     if (btime > visibleEndTime || btime < visibleStartTime) continue;
-                    var x = (float)((btime - visibleStartTime) * timeToX);
+                    var x = (float)((btime - visibleStartTime) * pixelsPerSecond);
                     graphics.DrawLine(bpmPen, x, 0, x, 15);
                 }
 
@@ -803,20 +808,17 @@ public partial class MainWindow : Window
                 foreach (var note in SimaiProcess.timinglist)
                 {
                     if (note.time > visibleEndTime || note.time < visibleStartTime) continue;
-                    var x = (float)((note.time - visibleStartTime) * timeToX);
+                    var x = (float)((note.time - visibleStartTime) * pixelsPerSecond);
                     graphics.DrawLine(timingPen, x, 60, x, 75);
                 }
                 
-                // FIX: The LOD threshold was too high. Lowering it to a more reasonable value.
-                if (linewidth > 0.1f)
-                {
-                    DrawNotes(graphics, visibleStartTime, timeToX);
-                }
+                // FIX: Always call DrawNotes. The logic inside will handle visibility.
+                DrawNotes(graphics, visibleStartTime, pixelsPerSecond);
 
                 // Draw Play Start Time
                 if (playStartTime >= visibleStartTime && playStartTime <= visibleEndTime)
                 {
-                    var x1 = (float)((playStartTime - visibleStartTime) * timeToX);
+                    var x1 = (float)((playStartTime - visibleStartTime) * pixelsPerSecond);
                     PointF[] tranglePoints = { new(x1 - 2, 0), new(x1 + 2, 0), new(x1, 3.46f) };
                     graphics.DrawPolygon(playStartPen, tranglePoints);
                 }
@@ -824,7 +826,7 @@ public partial class MainWindow : Window
                 // Draw Ghost Cursor
                 if (ghostCusorPositionTime >= visibleStartTime && ghostCusorPositionTime <= visibleEndTime)
                 {
-                    var x2 = (float)((ghostCusorPositionTime - visibleStartTime) * timeToX);
+                    var x2 = (float)((ghostCusorPositionTime - visibleStartTime) * pixelsPerSecond);
                     PointF[] tranglePoints2 = { new(x2 - 2, 0), new(x2 + 2, 0), new(x2, 3.46f) };
                     graphics.DrawPolygon(ghostCursorPen, tranglePoints2);
                 }
@@ -837,19 +839,25 @@ public partial class MainWindow : Window
         });
     }
 
-    // Optimization: Extracted note drawing logic into its own method for clarity
-    private void DrawNotes(Graphics graphics, double visibleStartTime, double timeToX)
+    // FIX: This method is heavily revised for correctness.
+    private void DrawNotes(Graphics graphics, double visibleStartTime, double pixelsPerSecond)
     {
         var visibleEndTime = visibleStartTime + deltatime * 2;
 
         foreach (var note in SimaiProcess.notelist)
         {
-            if (note.time > visibleEndTime || note.time < visibleStartTime) continue;
+            // Determine the note's main time and check if it's visible.
+            // For slides, the main time is the slide start time, not the tap time.
+            var noteTime = (note.getNotes().FirstOrDefault()?.noteType == SimaiNoteType.Slide) ? note.getNotes().First().slideStartTime : note.time;
+            var noteEndTime = noteTime + note.getNotes().Max(n => n.holdTime + n.slideTime);
+
+            if (noteEndTime < visibleStartTime || noteTime > visibleEndTime) continue;
             
             var notes = note.getNotes();
             var isEach = notes.Count(o => !o.isSlideNoHead) > 1;
-            // FIX: The x coordinate calculation was slightly off.
-            var x = (float)((note.time - visibleStartTime) * timeToX);
+            
+            // The X position of the note's start (tap time)
+            var x = (float)((note.time - visibleStartTime) * pixelsPerSecond);
 
             foreach (var noteD in notes)
             {
@@ -857,10 +865,10 @@ public partial class MainWindow : Window
 
                 if (noteD.isHanabi)
                 {
-                    var xDeltaHanabi = (float)(1f * timeToX);
+                    var xDeltaHanabi = (float)(1.0 * pixelsPerSecond);
                     var rectangleF = new RectangleF(x, 0, xDeltaHanabi, 75);
                     if (noteD.noteType == SimaiNoteType.TouchHold)
-                        rectangleF.X += (float)(noteD.holdTime * timeToX);
+                        rectangleF.X += (float)(noteD.holdTime * pixelsPerSecond);
                     using (var gradientBrush = new LinearGradientBrush(rectangleF, Color.FromArgb(100, 255, 0, 0), Color.FromArgb(0, 255, 0, 0), LinearGradientMode.Horizontal))
                     {
                         graphics.FillRectangle(gradientBrush, rectangleF);
@@ -893,17 +901,14 @@ public partial class MainWindow : Window
                 {
                     notePen.Width = 3;
                     notePen.Color = noteD.isBreak ? Color.OrangeRed : (isEach ? Color.Gold : Color.LightPink);
-                    var xRight = x + (float)(noteD.holdTime * timeToX);
-                    if (!float.IsNormal(xRight)) xRight = ushort.MaxValue;
-                    if (xRight - x < 1f) xRight = x + 5;
+                    var xRight = x + (float)(noteD.holdTime * pixelsPerSecond);
                     graphics.DrawLine(notePen, x, y, xRight, y);
                 }
                 
                 if (noteD.noteType == SimaiNoteType.TouchHold)
                 {
                     notePen.Width = 3;
-                    var xDelta = (float)(noteD.holdTime * timeToX) / 4f;
-                    if (!float.IsNormal(xDelta)) xDelta = ushort.MaxValue;
+                    var xDelta = (float)(noteD.holdTime * pixelsPerSecond) / 4f;
                     if (xDelta < 1f) xDelta = 1;
 
                     notePen.Color = Color.FromArgb(200, 255, 75, 0);
@@ -918,6 +923,7 @@ public partial class MainWindow : Window
 
                 if (noteD.noteType == SimaiNoteType.Slide)
                 {
+                    // Draw the star at the tap's location (x)
                     if (!noteD.isSlideNoHead)
                     {
                         starBrush.Color = noteD.isBreak ? Color.OrangeRed : (isEach ? Color.Gold : Color.DeepSkyBlue);
@@ -928,13 +934,11 @@ public partial class MainWindow : Window
                     notePen.Color = noteD.isSlideBreak ? Color.OrangeRed : (notes.Count(o => o.noteType == SimaiNoteType.Slide) >= 2 ? Color.Gold : Color.SkyBlue);
                     notePen.DashStyle = DashStyle.Dot;
                     
-                    var xSlide = (float)((noteD.slideStartTime - visibleStartTime) * timeToX);
-                    var xSlideRight = (float)(noteD.slideTime * timeToX) + xSlide;
-
-                    if (!float.IsNormal(xSlideRight)) xSlideRight = ushort.MaxValue;
-                    if (!float.IsNormal(xSlide)) xSlide = ushort.MaxValue;
+                    // The slide track itself starts at the slide's own start time
+                    var xSlideStart = (float)((noteD.slideStartTime - visibleStartTime) * pixelsPerSecond);
+                    var xSlideEnd = xSlideStart + (float)(noteD.slideTime * pixelsPerSecond);
                     
-                    graphics.DrawLine(notePen, xSlide, y, xSlideRight, y);
+                    graphics.DrawLine(notePen, xSlideStart, y, xSlideEnd, y);
                     notePen.DashStyle = DashStyle.Solid;
                 }
             }

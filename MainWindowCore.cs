@@ -781,46 +781,50 @@ public partial class MainWindow : Window
                     if (points.Count > 1) graphics.DrawLines(wavePen, points.ToArray());
                 }
                 
+                var visibleStartTime = currentTime - deltatime;
+                var visibleEndTime = currentTime + deltatime;
+                var timeToX = width / (deltatime * 2);
+
                 //Draw Bpm lines from cache
                 foreach (var btime in strongBeatCache)
                 {
-                    if (btime > currentTime + deltatime || btime < currentTime - deltatime) continue;
-                    var x = ((float)((btime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    if (btime > visibleEndTime || btime < visibleStartTime) continue;
+                    var x = (float)((btime - visibleStartTime) * timeToX);
                     graphics.DrawLine(bpmPen, x, 0, x, 75);
                 }
                 foreach (var btime in weakBeatCache)
                 {
-                    if (btime > currentTime + deltatime || btime < currentTime - deltatime) continue;
-                    var x = ((float)((btime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    if (btime > visibleEndTime || btime < visibleStartTime) continue;
+                    var x = (float)((btime - visibleStartTime) * timeToX);
                     graphics.DrawLine(bpmPen, x, 0, x, 15);
                 }
 
                 //Draw timing lines
                 foreach (var note in SimaiProcess.timinglist)
                 {
-                    if (note.time > currentTime + deltatime || note.time < currentTime - deltatime) continue;
-                    var x = ((float)((note.time - currentTime + deltatime) / (deltatime * 2))) * width;
+                    if (note.time > visibleEndTime || note.time < visibleStartTime) continue;
+                    var x = (float)((note.time - visibleStartTime) * timeToX);
                     graphics.DrawLine(timingPen, x, 60, x, 75);
                 }
-
-                // Optimization: Level of Detail (LOD) for notes. Don't draw if too zoomed out.
-                if (linewidth > 0.5f)
+                
+                // FIX: The LOD threshold was too high. Lowering it to a more reasonable value.
+                if (linewidth > 0.1f)
                 {
-                    DrawNotes(graphics, currentTime, width);
+                    DrawNotes(graphics, visibleStartTime, timeToX);
                 }
 
                 // Draw Play Start Time
-                if (playStartTime >= currentTime - deltatime && playStartTime <= currentTime + deltatime)
+                if (playStartTime >= visibleStartTime && playStartTime <= visibleEndTime)
                 {
-                    var x1 = ((float)((playStartTime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    var x1 = (float)((playStartTime - visibleStartTime) * timeToX);
                     PointF[] tranglePoints = { new(x1 - 2, 0), new(x1 + 2, 0), new(x1, 3.46f) };
                     graphics.DrawPolygon(playStartPen, tranglePoints);
                 }
 
                 // Draw Ghost Cursor
-                if (ghostCusorPositionTime >= currentTime - deltatime && ghostCusorPositionTime <= currentTime + deltatime)
+                if (ghostCusorPositionTime >= visibleStartTime && ghostCusorPositionTime <= visibleEndTime)
                 {
-                    var x2 = ((float)((ghostCusorPositionTime - currentTime + deltatime) / (deltatime * 2))) * width;
+                    var x2 = (float)((ghostCusorPositionTime - visibleStartTime) * timeToX);
                     PointF[] tranglePoints2 = { new(x2 - 2, 0), new(x2 + 2, 0), new(x2, 3.46f) };
                     graphics.DrawPolygon(ghostCursorPen, tranglePoints2);
                 }
@@ -834,17 +838,18 @@ public partial class MainWindow : Window
     }
 
     // Optimization: Extracted note drawing logic into its own method for clarity
-    private void DrawNotes(Graphics graphics, double currentTime, float totalWidth)
+    private void DrawNotes(Graphics graphics, double visibleStartTime, double timeToX)
     {
-        var timeToX = totalWidth / (deltatime * 2);
+        var visibleEndTime = visibleStartTime + deltatime * 2;
 
         foreach (var note in SimaiProcess.notelist)
         {
-            if (note.time > currentTime + deltatime || note.time < currentTime - deltatime) continue;
+            if (note.time > visibleEndTime || note.time < visibleStartTime) continue;
             
             var notes = note.getNotes();
             var isEach = notes.Count(o => !o.isSlideNoHead) > 1;
-            var x = (float)((note.time - currentTime + deltatime) * timeToX);
+            // FIX: The x coordinate calculation was slightly off.
+            var x = (float)((note.time - visibleStartTime) * timeToX);
 
             foreach (var noteD in notes)
             {
@@ -923,7 +928,7 @@ public partial class MainWindow : Window
                     notePen.Color = noteD.isSlideBreak ? Color.OrangeRed : (notes.Count(o => o.noteType == SimaiNoteType.Slide) >= 2 ? Color.Gold : Color.SkyBlue);
                     notePen.DashStyle = DashStyle.Dot;
                     
-                    var xSlide = (float)((noteD.slideStartTime - currentTime + deltatime) * timeToX);
+                    var xSlide = (float)((noteD.slideStartTime - visibleStartTime) * timeToX);
                     var xSlideRight = (float)(noteD.slideTime * timeToX) + xSlide;
 
                     if (!float.IsNormal(xSlideRight)) xSlideRight = ushort.MaxValue;

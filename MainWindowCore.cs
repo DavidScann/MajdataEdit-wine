@@ -665,7 +665,7 @@ public partial class MainWindow : Window
     private void DrawWave()
     {
         // Audio waveform rendering disabled for performance optimization
-        return;
+        // return;
         
         if (isDrawing) return;
         if (WaveBitmap == null) return;

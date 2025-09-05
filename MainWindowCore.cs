@@ -93,15 +93,8 @@ public partial class MainWindow : Window
     private readonly List<double> strongBeatCache = new();
     private readonly List<double> weakBeatCache = new();
     private double lastDrawnTime = -1.0;
-
-    // FIX: Add this constructor to hook up the TextChanged event
-    public MainWindow()
-    {
-        InitializeComponent(); // Assuming this is called in your original code
-        FumenContent.TextChanged += FumenContent_OnTextChanged;
-    }
-
-    // FIX: Add this event handler
+    
+    // This event handler provides the immediate update you requested
     private void FumenContent_OnTextChanged(object sender, TextChangedEventArgs e)
     {
         if (isLoading) return;
@@ -605,9 +598,11 @@ public partial class MainWindow : Window
         ViewerTouchSpeed.Content = editorSetting.touchSpeed.ToString("F1");
 
         chartChangeTimer.Interval = editorSetting.ChartRefreshDelay; // 设置更新延迟
-        chartChangeTimer.AutoReset = false; // FIX: Ensure timer only fires once per edit session
+        chartChangeTimer.AutoReset = false; 
         chartChangeTimer.Elapsed += ChartChangeTimer_Elapsed;
-
+        
+        // FIX: Hook up the TextChanged event handler here instead of a new constructor
+        FumenContent.TextChanged += FumenContent_OnTextChanged;
 
         SaveEditorSetting(); // 覆盖旧版本setting
     }
@@ -1477,9 +1472,7 @@ public partial class MainWindow : Window
                     // 从1.0开始，结束于3.1。后续的语义化版本号继承该版本号进度，从4.0开始
                     // 增加 -beta 后缀
                     var startPos = versionString.IndexOfAny("0123456789".ToArray());
-                    versionString = versionString[startPos..];
-                    if (versionString.Contains(' '))
-                        versionString = versionString[..versionString.IndexOf(' ')];
+                    versionString = versionString[..versionString.IndexOf(' ')];
                     versionString += "-beta";
                     result = SemVersion.Parse(versionString, SemVersionStyles.Any);
                 }
